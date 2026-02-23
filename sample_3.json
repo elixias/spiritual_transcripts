@@ -1,0 +1,47 @@
+[
+  {
+    "title": "Structured Jyotish Curriculum: From Basics to Application",
+    "category": "jyotish",
+    "subcategory": "structured_curriculum_overview",
+    "context": "Outline of structured Jyotish curriculum for future online university.",
+    "normalized_terms": {
+      "Rashi's": "Rashis",
+      "Nakshatras": "Nakshatras",
+      "Rahu and Ketu": "Rahu and Ketu",
+      "Vimshotri": "Vimshottari",
+      "Gochar": "Gochar"
+    },
+    "segments": [
+      {
+        "start": 2326.78,
+        "end": 2374.28,
+        "raw_text": "Okay, so basically what we had done was we had created a very simple outline of around 15 to 20 topics that are needed to cover that we need to cover in order to learn basic Jyotish, functioning Jyotish, right? ... give readings and understandings to people who come with questions and guide them.",
+        "clean_text": "Okay, so basically what we had done was we had created a very simple outline of around 15 to 20 topics that are needed to cover in order to learn basic Jyotish, functioning Jyotish, right? ... give readings and understandings to people who come with questions and guide them."
+      },
+      {
+        "start": 2388.08,
+        "end": 2466.84,
+        "raw_text": "We'll start with the 12 Rashi's ... Then we are going to do a deep dive on the nine planets ... Rahu and Ketu ... 27 constellations ... how to calculate sidereal times ... how to create a horoscope.",
+        "clean_text": "We'll start with the 12 Rashis ... Then we are going to do a deep dive on the nine planets ... Rahu and Ketu ... 27 Nakshatras ... how to calculate sidereal times ... how to create a horoscope."
+      },
+      {
+        "start": 2553.20,
+        "end": 2606.64,
+        "raw_text": "From there we'll cover what is called Vimshotri ... dominant planet ... which two planets together are good ... what we call panchadametri.",
+        "clean_text": "From there we'll cover what is called Vimshottari ... dominant planet ... which two planets together are good ... what we call Panchada Metri."
+      },
+      {
+        "start": 2693.68,
+        "end": 2743.72,
+        "raw_text": "Gochar ... One aspect is the horoscope that you are born with ... second is how are the planets placed right now ... that has an impact of around 20% ... beyond that is the Devic.",
+        "clean_text": "Gochar ... One aspect is the horoscope that you are born with ... second is how are the planets placed right now ... that has an impact of around 20% ... beyond that is the Devic."
+      },
+      {
+        "start": 2753.68,
+        "end": 2791.36,
+        "raw_text": "How do you look at misery, happiness, wealth, career ... how are you able to suggest a method of upliftment to them.",
+        "clean_text": "How do you look at misery, happiness, wealth, career ... how are you able to suggest a method of upliftment to them."
+      }
+    ]
+  }
+]
