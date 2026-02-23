@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from .config import StageLLMConfig
@@ -63,7 +64,16 @@ class ModelManager:
         api_key = self.stage_cfg.api_key or os.getenv("OPENAI_API_KEY")
         if api_key:
             kwargs["api_key"] = api_key
+        if self._supports_openai_reasoning_controls(model_name):
+            kwargs["reasoning"] = {"effort": "low", "summary": None}
+            kwargs["output_version"] = "responses/v1"
         return ChatOpenAI(**kwargs)
+
+    def _supports_openai_reasoning_controls(self, model_name: str) -> bool:
+        lower = model_name.lower()
+        if lower.startswith(("o1", "o3", "o4")):
+            return True
+        return re.match(r"^gpt-5(?:$|[.\-].*)", lower) is not None
 
     def _anthropic_chat(self, model_name: str, *, temperature: float) -> Any:
         try:

@@ -1,0 +1,2 @@
+[console_scripts]
+stp = spiritual_transcript_pipeline.cli:main
