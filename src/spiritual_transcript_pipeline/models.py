@@ -26,3 +26,7 @@ class ModuleClip:
     context: str | None
     normalized_terms: dict[str, Any] | None
     segments: list[ModuleSegment]
+    categorization_confidence: float | None = None
+    retried: bool | None = None
+    reordered: bool | None = None
+    processing_metadata: dict[str, Any] | None = None

@@ -28,14 +28,18 @@ def save_json(data: object, output_path: Path) -> None:
 
 
 def parse_transcript_txt(path: Path) -> list[TranscriptLine]:
+    return parse_transcript_text(path.read_text(encoding="utf-8"), source=str(path))
+
+
+def parse_transcript_text(text: str, *, source: str = "<transcript>") -> list[TranscriptLine]:
     lines: list[TranscriptLine] = []
-    for idx, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for idx, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
         if not stripped:
             continue
         match = TRANSCRIPT_LINE_RE.match(stripped)
         if not match:
-            raise ValueError(f"Invalid transcript line format at {path}:{idx}: {raw}")
+            raise ValueError(f"Invalid transcript line format at {source}:{idx}: {raw}")
         start = float(match.group("start"))
         end = float(match.group("end"))
         text = match.group("text").strip()

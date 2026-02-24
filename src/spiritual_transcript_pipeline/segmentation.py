@@ -24,6 +24,40 @@ def parse_llm_json_response(raw_text: str) -> Any:
     return json.loads(candidate)
 
 
+def _parse_confidence(value: Any, *, module_idx: int) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"Module {module_idx}: categorization_confidence must be a number or null")
+
+    raw = value
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return None
+        is_percent = raw.endswith("%")
+        if is_percent:
+            raw = raw[:-1].strip()
+        try:
+            parsed = float(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Module {module_idx}: categorization_confidence must be a number or null") from exc
+        if is_percent:
+            parsed /= 100.0
+    else:
+        try:
+            parsed = float(raw)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Module {module_idx}: categorization_confidence must be a number or null") from exc
+
+    # Be tolerant of 0..100 numeric percentages from LLM output.
+    if 1 < parsed <= 100:
+        parsed /= 100.0
+    if parsed < 0 or parsed > 1:
+        raise ValueError(f"Module {module_idx}: categorization_confidence must be between 0 and 1")
+    return parsed
+
+
 def _to_module_clip(item: dict[str, Any], idx: int) -> ModuleClip:
     if not isinstance(item.get("title"), str) or not item["title"].strip():
         raise ValueError(f"Module {idx}: missing/invalid title")
@@ -59,6 +93,16 @@ def _to_module_clip(item: dict[str, Any], idx: int) -> ModuleClip:
     normalized_terms = item.get("normalized_terms")
     if normalized_terms is not None and not isinstance(normalized_terms, dict):
         raise ValueError(f"Module {idx}: normalized_terms must be object or null")
+    categorization_confidence = _parse_confidence(item.get("categorization_confidence"), module_idx=idx)
+    retried = item.get("retried")
+    if retried is not None and not isinstance(retried, bool):
+        raise ValueError(f"Module {idx}: retried must be boolean or null")
+    reordered = item.get("reordered")
+    if reordered is not None and not isinstance(reordered, bool):
+        raise ValueError(f"Module {idx}: reordered must be boolean or null")
+    processing_metadata = item.get("processing_metadata")
+    if processing_metadata is not None and not isinstance(processing_metadata, dict):
+        raise ValueError(f"Module {idx}: processing_metadata must be object or null")
 
     return ModuleClip(
         title=item["title"].strip(),
@@ -67,6 +111,10 @@ def _to_module_clip(item: dict[str, Any], idx: int) -> ModuleClip:
         context=context.strip() if isinstance(context, str) else None,
         normalized_terms=normalized_terms,
         segments=segments,
+        categorization_confidence=categorization_confidence,
+        retried=retried,
+        reordered=reordered,
+        processing_metadata=processing_metadata,
     )
 
 
@@ -136,6 +184,10 @@ def modules_to_jsonable(modules: list[ModuleClip]) -> list[dict[str, Any]]:
             "subcategory": module.subcategory,
             "context": module.context,
             "normalized_terms": module.normalized_terms,
+            "categorization_confidence": module.categorization_confidence,
+            "retried": module.retried,
+            "reordered": module.reordered,
+            "processing_metadata": module.processing_metadata,
             "segments": [
                 {"start": seg.start, "end": seg.end, "text": seg.text} for seg in module.segments
             ],

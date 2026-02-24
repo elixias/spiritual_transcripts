@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -44,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_segment.add_argument("--prompt-file", type=Path)
     p_segment.add_argument("--raw-response-out", type=Path)
     p_segment.add_argument("--no-validate", action="store_true")
+    p_segment.add_argument(
+        "--idea",
+        type=str,
+        help="User-provided module idea/topic string. If set, skips automatic idea generation and selects clips for this idea only.",
+    )
 
     p_cut = sub.add_parser("cut", help="Cut module clips from source video using modules JSON.")
     p_cut.add_argument("input_video", type=Path)
@@ -56,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--prompt-file", type=Path)
     p_all.add_argument("--sample-rate", type=int, default=16000)
     p_all.add_argument("--no-validate", action="store_true")
+    p_all.add_argument(
+        "--idea",
+        type=str,
+        help="User-provided module idea/topic string. If set, skips automatic idea generation and selects clips for this idea only.",
+    )
 
     return parser
 
@@ -92,6 +103,7 @@ def cmd_segment(args: argparse.Namespace, cfg: PipelineConfig) -> int:
         prompt_file=prompt_path,
         stage_cfg=cfg.segment,
         temperature=cfg.segment_temperature,
+        idea_override=args.idea,
     )
     if args.raw_response_out:
         args.raw_response_out.parent.mkdir(parents=True, exist_ok=True)
@@ -148,6 +160,7 @@ def cmd_run_all(args: argparse.Namespace, cfg: PipelineConfig) -> int:
         prompt_file=prompt_path,
         stage_cfg=cfg.segment,
         temperature=cfg.segment_temperature,
+        idea_override=args.idea,
     )
     raw_llm_path.write_text(raw_response, encoding="utf-8")
 
@@ -166,6 +179,9 @@ def cmd_run_all(args: argparse.Namespace, cfg: PipelineConfig) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+        logging.getLogger("spiritual_transcript_pipeline").setLevel(logging.INFO)
     parser = build_parser()
     args = parser.parse_args(argv)
     cfg = PipelineConfig.from_env()
