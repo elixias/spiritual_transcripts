@@ -20,6 +20,15 @@ from .segmentation import (
 from .transcript import parse_transcript_txt, save_json, save_transcript_txt
 
 
+def _resolve_idea_override(idea_arg: str | None) -> str | None:
+    if idea_arg is None:
+        return None
+    candidate = Path(idea_arg).expanduser()
+    if candidate.is_file():
+        return candidate.read_text(encoding="utf-8")
+    return idea_arg
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stp",
@@ -48,7 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_segment.add_argument(
         "--idea",
         type=str,
-        help="User-provided module idea/topic string. If set, skips automatic idea generation and selects clips for this idea only.",
+        help=(
+            "User-provided module idea text, or a path to a text file containing one or more ideas "
+            "(for example, one idea per line/paragraph). If set, skips automatic idea generation."
+        ),
     )
 
     p_cut = sub.add_parser("cut", help="Cut module clips from source video using modules JSON.")
@@ -65,7 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument(
         "--idea",
         type=str,
-        help="User-provided module idea/topic string. If set, skips automatic idea generation and selects clips for this idea only.",
+        help=(
+            "User-provided module idea text, or a path to a text file containing one or more ideas "
+            "(for example, one idea per line/paragraph). If set, skips automatic idea generation."
+        ),
     )
 
     return parser
@@ -103,7 +118,7 @@ def cmd_segment(args: argparse.Namespace, cfg: PipelineConfig) -> int:
         prompt_file=prompt_path,
         stage_cfg=cfg.segment,
         temperature=cfg.segment_temperature,
-        idea_override=args.idea,
+        idea_override=_resolve_idea_override(args.idea),
     )
     if args.raw_response_out:
         args.raw_response_out.parent.mkdir(parents=True, exist_ok=True)
@@ -160,7 +175,7 @@ def cmd_run_all(args: argparse.Namespace, cfg: PipelineConfig) -> int:
         prompt_file=prompt_path,
         stage_cfg=cfg.segment,
         temperature=cfg.segment_temperature,
-        idea_override=args.idea,
+        idea_override=_resolve_idea_override(args.idea),
     )
     raw_llm_path.write_text(raw_response, encoding="utf-8")
 

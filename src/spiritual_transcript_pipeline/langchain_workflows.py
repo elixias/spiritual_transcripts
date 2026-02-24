@@ -191,27 +191,30 @@ Transcript:
         ideas_parser,
     )
 
-    user_idea_parser = PydanticOutputParser(pydantic_object=StoryIdeaOutput)
-    user_idea_chain = _pydantic_chain(
+    user_ideas_parser = PydanticOutputParser(pydantic_object=StoryIdeasOutput)
+    user_ideas_chain = _pydantic_chain(
         """
-You are converting ONE user-provided clip idea into the internal structured story idea format.
+You are converting a user-provided idea draft into one or more internal structured story ideas.
 
 Given:
-- a user idea string
-- editorial rules / taxonomy
-- inferred lecture context
-- the full transcript
+ - a user idea draft string (may contain one idea or multiple ideas)
+ - editorial rules / taxonomy
+ - inferred lecture context
+ - the full transcript
 
-Produce ONE STRICT JSON object with fields:
+Produce a STRICT JSON object with key `ideas`, where `ideas` is an array containing one or more items.
+Each item must contain:
 - title
 - category
 - subcategory
 - context
-- story_orchestrator { main_point, opening, important_fact, conclusion }
+- story_orchestrator {{ main_point, opening, important_fact, conclusion }}
 
 Requirements:
 - Ground everything in transcript content.
-- Preserve the user's intended topic/scope.
+- Preserve the user's intended topic/scope from the draft.
+- If the draft contains multiple distinct module ideas, return multiple items.
+- If the draft contains one idea, return exactly one item.
 - Choose the closest taxonomy category from editorial rules if possible.
 - If taxonomy mapping is unclear, use category "user_provided".
 - Make story_orchestrator fields specific and useful for segment selection (not duplicates).
@@ -219,7 +222,7 @@ Requirements:
 Output format instructions:
 {format_instructions}
 
-User idea:
+User idea draft:
 {user_idea}
 
 Editorial rules:
@@ -234,7 +237,7 @@ Transcript:
 <<<END>>>
         """.strip(),
         model,
-        user_idea_parser,
+        user_ideas_parser,
     )
 
     module_parser = PydanticOutputParser(pydantic_object=ModuleSelectionFlexibleOutput)
@@ -346,40 +349,55 @@ Output format instructions:
             },
         }
 
+    def _normalize_story_idea_dict(item_dict: dict[str, Any], raw_idea: str) -> dict[str, Any]:
+        if not item_dict.get("title"):
+            item_dict["title"] = raw_idea[:120]
+        if not item_dict.get("category"):
+            item_dict["category"] = "user_provided"
+
+        # Ensure story_orchestrator exists and is usable for downstream selection prompts.
+        so = item_dict.get("story_orchestrator")
+        if not isinstance(so, dict):
+            return _fallback_user_idea(raw_idea, reason="missing story_orchestrator")
+
+        for key in ("main_point", "opening", "important_fact", "conclusion"):
+            value = so.get(key)
+            if not isinstance(value, str) or not value.strip():
+                so[key] = raw_idea
+        item_dict["story_orchestrator"] = so
+        return item_dict
+
     def normalize_user_idea(state: SegmentWorkflowState) -> SegmentWorkflowState:
-        raw_idea = (state.get("user_idea_override") or "").strip()
-        if not raw_idea:
+        raw_idea_draft = (state.get("user_idea_override") or "").strip()
+        if not raw_idea_draft:
             raise ValueError("`--idea` was provided but is empty.")
-        logger.info("Normalizing user-provided idea override into structured story idea")
+        logger.info(
+            "Normalizing user-provided idea draft into structured story idea(s)",
+        )
         try:
-            idea_payload = user_idea_chain.invoke(
+            ideas_payload = user_ideas_chain.invoke(
                 {
-                    "user_idea": raw_idea,
+                    "user_idea": raw_idea_draft,
                     "editorial_rules": state["editorial_rules"],
                     "context_analysis_json": json.dumps(state["context_analysis"], ensure_ascii=False, indent=2),
                     "transcript": state["transcript_text"],
                 }
             )
-            item_dict = idea_payload.model_dump()
-            if not item_dict.get("title"):
-                item_dict["title"] = raw_idea[:120]
-            if not item_dict.get("category"):
-                item_dict["category"] = "user_provided"
-
-            # Ensure story_orchestrator exists and is usable for downstream selection prompts.
-            so = item_dict.get("story_orchestrator")
-            if not isinstance(so, dict):
-                item_dict = _fallback_user_idea(raw_idea, reason="missing story_orchestrator")
-            else:
-                for key in ("main_point", "opening", "important_fact", "conclusion"):
-                    value = so.get(key)
-                    if not isinstance(value, str) or not value.strip():
-                        so[key] = raw_idea
-                item_dict["story_orchestrator"] = so
-            return {"story_ideas": [item_dict]}
+            normalized_ideas: list[dict[str, Any]] = []
+            for idx, item in enumerate(ideas_payload.ideas, start=1):
+                item_dict = _normalize_story_idea_dict(item.model_dump(), raw_idea_draft)
+                if not item_dict.get("title"):
+                    raise ValueError(f"User idea item {idx} missing title.")
+                if not item_dict.get("category"):
+                    raise ValueError(f"User idea item {idx} missing category.")
+                normalized_ideas.append(item_dict)
+            if not normalized_ideas:
+                raise ValueError("User idea draft normalization returned zero ideas.")
+            logger.info("User idea draft normalized into %s idea(s)", len(normalized_ideas))
+            return {"story_ideas": normalized_ideas}
         except Exception as exc:  # noqa: BLE001
-            logger.warning("User idea normalization failed; using fallback structure: %s", exc)
-            return {"story_ideas": [_fallback_user_idea(raw_idea, reason=str(exc))]}
+            logger.warning("User idea draft normalization failed; using fallback structure: %s", exc)
+            return {"story_ideas": [_fallback_user_idea(raw_idea_draft, reason=str(exc))]}
 
     def generate_story_ideas(state: SegmentWorkflowState) -> SegmentWorkflowState:
         ideas_payload = ideas_chain.invoke(
