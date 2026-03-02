@@ -1,5 +1,14 @@
 # Spiritual Transcript Pipeline
 
+## Command to transcribe audio
+stp segment "/Users/elixander.tan/Downloads/Module 1 Intro to Shakti Kundalini Yoga_whisper_1.txt" -o "/Users/elixander.tan/Desktop/raw_text/processed/raw_text/M1_whisper_v5_with_user_idea_input.json" --idea "/Users/elixander.tan/Desktop/raw_text/2012 06 19 Sadhak Induction Modules/ideas.txt"
+
+stp export-pdf "/Users/elixander.tan/Desktop/raw_text/processed/raw_text/Module 2 Divine Healing & Karma.json" \
+  -o "/Users/elixander.tan/Desktop/raw_text/processed/raw_text/Module 2 Divine Healing & Karma.pdf" \
+  --title "Module 2 - Divine Healing & Karma"
+
+## CLI Pipeline - About
+
 CLI pipeline to:
 
 1. Extract audio from a video
@@ -76,6 +85,12 @@ stp segment work/transcript.txt -o work/modules.json
 stp cut input.mp4 work/modules.json --out-dir work/clips
 ```
 
+### 5) Export modules JSON to PDF
+
+```bash
+stp export-pdf work/modules.json -o work/modules.pdf
+```
+
 ### Full pipeline
 
 ```bash
@@ -94,5 +109,6 @@ This creates:
 
 - The `segment` command validates JSON structure, non-overlapping segments, and approximate module duration (3-20 min by summed segment duration).
 - The `cut` command creates one output clip per module by cutting each module segment and concatenating them.
+- The `export-pdf` command renders the modules JSON into a readable PDF with metadata and timestamped transcript segments.
 - The prompt template is stored in `prompts/segment_modules_prompt.txt`.
 - Segmentation orchestration uses LangGraph (context analysis -> story idea orchestration -> per-idea segment selection).

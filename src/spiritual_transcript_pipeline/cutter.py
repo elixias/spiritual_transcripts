@@ -21,7 +21,12 @@ def _slugify(value: str) -> str:
 
 def _load_modules(path: Path) -> list[ModuleClip]:
     payload: Any = json.loads(path.read_text(encoding="utf-8"))
-    return validate_modules_payload(payload, transcript_lines=None, enforce_duration=False)
+    return validate_modules_payload(
+        payload,
+        transcript_lines=None,
+        enforce_duration=False,
+        enforce_global_overlap=False,
+    )
 
 
 def _module_output_name(index: int, module: ModuleClip) -> str:

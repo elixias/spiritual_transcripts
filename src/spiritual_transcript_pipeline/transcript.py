@@ -7,8 +7,30 @@ from pathlib import Path
 from .models import TranscriptLine
 
 TRANSCRIPT_LINE_RE = re.compile(
-    r"^\[(?P<start>\d+(?:\.\d+)?)\s*-\s*(?P<end>\d+(?:\.\d+)?)\]\s*(?P<text>.*)$"
+    r"^\[(?P<start>[0-9:.]+)\s*-\s*(?P<end>[0-9:.]+)\]\s*(?P<text>.*)$"
 )
+
+
+def _parse_timestamp(raw: str) -> float:
+    raw = raw.strip()
+    if ":" not in raw:
+        return float(raw)
+
+    parts = raw.split(":")
+    if len(parts) not in (2, 3):
+        raise ValueError(f"Unsupported timestamp format: {raw}")
+
+    try:
+        values = [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError(f"Unsupported timestamp format: {raw}") from exc
+
+    multiplier = 1.0
+    total = 0.0
+    for value in reversed(values):
+        total += value * multiplier
+        multiplier *= 60.0
+    return total
 
 
 def format_transcript_lines(lines: list[TranscriptLine]) -> str:
@@ -40,8 +62,11 @@ def parse_transcript_text(text: str, *, source: str = "<transcript>") -> list[Tr
         match = TRANSCRIPT_LINE_RE.match(stripped)
         if not match:
             raise ValueError(f"Invalid transcript line format at {source}:{idx}: {raw}")
-        start = float(match.group("start"))
-        end = float(match.group("end"))
+        try:
+            start = _parse_timestamp(match.group("start"))
+            end = _parse_timestamp(match.group("end"))
+        except ValueError as exc:
+            raise ValueError(f"Invalid transcript line format at {source}:{idx}: {raw}") from exc
         text = match.group("text").strip()
         lines.append(TranscriptLine(start=start, end=end, text=text))
     return lines

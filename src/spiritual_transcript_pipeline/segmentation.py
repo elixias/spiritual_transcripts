@@ -24,6 +24,25 @@ def parse_llm_json_response(raw_text: str) -> Any:
     return json.loads(candidate)
 
 
+def extract_modules_payload(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        if "modules" not in payload:
+            raise ValueError("LLM output object must contain a `modules` key.")
+        return payload["modules"]
+    return payload
+
+
+def get_workflow_metadata(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    workflow_metadata = payload.get("workflow_metadata")
+    if workflow_metadata is None:
+        return None
+    if not isinstance(workflow_metadata, dict):
+        raise ValueError("`workflow_metadata` must be an object when present.")
+    return workflow_metadata
+
+
 def _parse_confidence(value: Any, *, module_idx: int) -> float | None:
     if value is None:
         return None
@@ -123,11 +142,13 @@ def validate_modules_payload(
     transcript_lines: list[TranscriptLine] | None = None,
     *,
     enforce_duration: bool = True,
+    enforce_global_overlap: bool = True,
 ) -> list[ModuleClip]:
-    if not isinstance(payload, list):
+    modules_payload = extract_modules_payload(payload)
+    if not isinstance(modules_payload, list):
         raise ValueError("LLM output must be a JSON array.")
 
-    modules = [_to_module_clip(item, idx + 1) for idx, item in enumerate(payload)]
+    modules = [_to_module_clip(item, idx + 1) for idx, item in enumerate(modules_payload)]
 
     all_intervals: list[tuple[float, float, int, int]] = []
     valid_starts: set[float] = set()
@@ -163,21 +184,24 @@ def validate_modules_payload(
                 f"Module {mod_idx} duration {total_duration:.1f}s is outside the 3-20 minute range."
             )
 
-    all_intervals.sort(key=lambda x: (x[0], x[1]))
-    prev: tuple[float, float, int, int] | None = None
-    for current in all_intervals:
-        if prev is not None and current[0] < prev[1]:
-            raise ValueError(
-                "Modules overlap across the full output "
-                f"(module {prev[2]} segment {prev[3]} overlaps module {current[2]} segment {current[3]})."
-            )
-        prev = current
+    if enforce_global_overlap:
+        all_intervals.sort(key=lambda x: (x[0], x[1]))
+        prev: tuple[float, float, int, int] | None = None
+        for current in all_intervals:
+            if prev is not None and current[0] < prev[1]:
+                raise ValueError(
+                    "Modules overlap across the full output "
+                    f"(module {prev[2]} segment {prev[3]} overlaps module {current[2]} segment {current[3]})."
+                )
+            prev = current
 
     return modules
 
 
-def modules_to_jsonable(modules: list[ModuleClip]) -> list[dict[str, Any]]:
-    return [
+def modules_to_jsonable(
+    modules: list[ModuleClip], *, workflow_metadata: dict[str, Any] | None = None
+) -> list[dict[str, Any]] | dict[str, Any]:
+    modules_jsonable = [
         {
             "title": module.title,
             "category": module.category,
@@ -194,3 +218,9 @@ def modules_to_jsonable(modules: list[ModuleClip]) -> list[dict[str, Any]]:
         }
         for module in modules
     ]
+    if workflow_metadata is None:
+        return modules_jsonable
+    return {
+        "modules": modules_jsonable,
+        "workflow_metadata": workflow_metadata,
+    }

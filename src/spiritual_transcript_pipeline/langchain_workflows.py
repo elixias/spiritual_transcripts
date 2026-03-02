@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
 
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
 from langgraph.graph import END, START, StateGraph
@@ -14,10 +15,19 @@ from pydantic import BaseModel, Field, RootModel
 from .config import StageLLMConfig
 from .model_manager import ModelManager
 from .segmentation import validate_modules_payload
-from .transcript import parse_transcript_text
+from .transcript import format_transcript_lines, parse_transcript_text
 
 
 logger = logging.getLogger(__name__)
+
+
+OPENAI_PRICING_PER_1M_TOKENS: dict[str, dict[str, float]] = {
+    "gpt-5.1": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
+    "gpt-5": {"input": 1.25, "cached_input": 0.125, "output": 10.0},
+    "gpt-5.2": {"input": 1.75, "cached_input": 0.175, "output": 14.0},
+    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.0},
+    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.4},
+}
 
 
 class SegmentWorkflowState(TypedDict, total=False):
@@ -81,6 +91,135 @@ class ModuleSelectionFlexibleOutput(RootModel[ModuleSelectionOutput | list[Modul
     pass
 
 
+def _normalize_model_name(model_name: str | None) -> str | None:
+    if not model_name:
+        return None
+    return model_name.strip().lower()
+
+
+def _lookup_openai_pricing(model_name: str | None) -> dict[str, float] | None:
+    normalized = _normalize_model_name(model_name)
+    if not normalized:
+        return None
+    for prefix, pricing in sorted(OPENAI_PRICING_PER_1M_TOKENS.items(), key=lambda item: len(item[0]), reverse=True):
+        if normalized.startswith(prefix):
+            return pricing
+    return None
+
+
+def _resolve_usage_provider(provider: str | None, configured_model: str | None, seen_models: list[str]) -> str | None:
+    if provider:
+        return provider
+
+    candidates = [configured_model, *seen_models]
+    for model_name in candidates:
+        normalized = _normalize_model_name(model_name)
+        if not normalized:
+            continue
+        if normalized.startswith(("gpt-", "o1", "o3", "o4", "chatgpt-")):
+            return "openai"
+        if normalized.startswith("claude"):
+            return "anthropic"
+        if normalized.startswith("gemini"):
+            return "google"
+    return None
+
+
+def _build_usage_summary(
+    usage_callback: UsageMetadataCallbackHandler, *, provider: str | None, configured_model: str | None
+) -> dict[str, Any]:
+    resolved_provider = _resolve_usage_provider(
+        provider,
+        configured_model,
+        list(usage_callback.usage_metadata.keys()),
+    )
+    models: dict[str, Any] = {}
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_tokens = 0
+    total_cached_input_tokens = 0
+    total_estimated_cost_usd = 0.0
+    estimated_cost_available = False
+
+    for model_name, usage in usage_callback.usage_metadata.items():
+        input_tokens = int(usage.get("input_tokens", 0))
+        output_tokens = int(usage.get("output_tokens", 0))
+        total = int(usage.get("total_tokens", input_tokens + output_tokens))
+        input_details = usage.get("input_token_details") or {}
+        cached_input_tokens = int(input_details.get("cache_read", 0))
+
+        model_summary: dict[str, Any] = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total,
+            "cached_input_tokens": cached_input_tokens,
+            "usage_metadata": usage,
+        }
+
+        pricing = _lookup_openai_pricing(model_name) if (resolved_provider or "").lower() == "openai" else None
+        if pricing is not None:
+            noncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
+            estimated_cost = (
+                (noncached_input_tokens / 1_000_000.0) * pricing["input"]
+                + (cached_input_tokens / 1_000_000.0) * pricing["cached_input"]
+                + (output_tokens / 1_000_000.0) * pricing["output"]
+            )
+            model_summary["pricing_usd_per_1m_tokens"] = pricing
+            model_summary["estimated_cost_usd"] = estimated_cost
+            total_estimated_cost_usd += estimated_cost
+            estimated_cost_available = True
+        else:
+            model_summary["pricing_usd_per_1m_tokens"] = None
+            model_summary["estimated_cost_usd"] = None
+
+        models[model_name] = model_summary
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+        total_tokens += total
+        total_cached_input_tokens += cached_input_tokens
+
+    summary: dict[str, Any] = {
+        "provider": resolved_provider,
+        "configured_model": configured_model,
+        "models": models,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "total_tokens": total_tokens,
+        "cached_input_tokens": total_cached_input_tokens,
+        "estimated_cost_usd": total_estimated_cost_usd if estimated_cost_available else None,
+    }
+    if (resolved_provider or "").lower() == "openai":
+        summary["pricing_source"] = "https://platform.openai.com/docs/models/gpt-5.1/"
+    return summary
+
+
+def _dominant_topics_json(context_analysis: dict[str, Any]) -> str:
+    topics = context_analysis.get("dominant_topics")
+    if not isinstance(topics, list):
+        topics = []
+    clean_topics = [str(topic).strip() for topic in topics if str(topic).strip()]
+    return json.dumps(clean_topics, ensure_ascii=False, indent=2)
+
+
+def _should_retry_user_idea_split(raw_idea_draft: str, normalized_ideas: list[dict[str, Any]], dominant_topics: list[str]) -> bool:
+    if len(normalized_ideas) != 1:
+        return False
+    if len(dominant_topics) < 3:
+        return False
+
+    draft = raw_idea_draft.strip()
+    if "\n" in draft:
+        nonempty_lines = [line.strip() for line in draft.splitlines() if line.strip()]
+        if len(nonempty_lines) >= 2:
+            return True
+
+    separators = [";", "•", "-", "*", "|", ":"]
+    if sum(draft.count(sep) for sep in separators) >= 3:
+        return True
+
+    return len(draft) > 180
+
+
 def _load_editorial_rules(template_path: Path) -> str:
     template = template_path.read_text(encoding="utf-8")
     marker = "Now process the transcript:"
@@ -104,6 +243,20 @@ def _pydantic_chain(template: str, model: Any, parser: PydanticOutputParser):
     return prompt | model | parser
 
 
+def _pydantic_prompt(template: str, parser: PydanticOutputParser) -> PromptTemplate:
+    return PromptTemplate(
+        template=template,
+        input_variables=sorted(
+            {
+                field_name
+                for field_name in PromptTemplate.from_template(template).input_variables
+                if field_name != "format_instructions"
+            }
+        ),
+        partial_variables={"format_instructions": parser.get_format_instructions()},
+    )
+
+
 def run_segment_generation_workflow(
     *,
     transcript_text: str,
@@ -114,7 +267,10 @@ def run_segment_generation_workflow(
 ) -> str:
     editorial_rules = _load_editorial_rules(prompt_file)
     transcript_lines = parse_transcript_text(transcript_text)
+    normalized_transcript_text = format_transcript_lines(transcript_lines)
     model = ModelManager(stage_cfg).get_chat_model(temperature=temperature)
+    usage_callback = UsageMetadataCallbackHandler()
+    invoke_config = {"callbacks": [usage_callback]}
 
     context_parser = PydanticOutputParser(pydantic_object=LectureContextOutput)
     context_chain = _pydantic_chain(
@@ -171,6 +327,9 @@ Constraints:
 - Ideas must be grounded in transcript content only.
 - Prefer 2-8 ideas depending on transcript breadth.
 - Ideas should be conceptually distinct and suitable for 3-20 minute modules.
+- Use the dominant topics list as the primary source of idea candidates.
+- Cover the major distinct dominant topics instead of collapsing the whole lecture into one umbrella idea.
+- Avoid merging clearly different dominant topics into one idea unless the transcript treats them as a single uninterrupted teaching unit.
 - Use the closest taxonomy category from the editorial rules when applicable.
 
 Output format instructions:
@@ -182,6 +341,9 @@ Editorial rules:
 Context analysis JSON:
 {context_analysis_json}
 
+Dominant topics:
+{dominant_topics_json}
+
 Transcript:
 <<<TRANSCRIPT>>>
 {transcript}
@@ -192,8 +354,7 @@ Transcript:
     )
 
     user_ideas_parser = PydanticOutputParser(pydantic_object=StoryIdeasOutput)
-    user_ideas_chain = _pydantic_chain(
-        """
+    user_ideas_template = """
 You are converting a user-provided idea draft into one or more internal structured story ideas.
 
 Given:
@@ -215,6 +376,9 @@ Requirements:
 - Preserve the user's intended topic/scope from the draft.
 - If the draft contains multiple distinct module ideas, return multiple items.
 - If the draft contains one idea, return exactly one item.
+- Use the dominant topics list to decide whether the draft is actually covering multiple distinct ideas.
+- If the draft is a heading list, summary list, or broad lecture outline that spans multiple dominant topics, split it into multiple ideas instead of collapsing it into one umbrella idea.
+- Only keep it as one idea when the draft is clearly focused on one coherent topic.
 - Choose the closest taxonomy category from editorial rules if possible.
 - If taxonomy mapping is unclear, use category "user_provided".
 - Make story_orchestrator fields specific and useful for segment selection (not duplicates).
@@ -231,15 +395,64 @@ Editorial rules:
 Lecture context analysis:
 {context_analysis_json}
 
+Dominant topics:
+{dominant_topics_json}
+
 Transcript:
 <<<TRANSCRIPT>>>
 {transcript}
 <<<END>>>
-        """.strip(),
-        model,
-        user_ideas_parser,
-    )
+    """.strip()
+    user_ideas_prompt = _pydantic_prompt(user_ideas_template, user_ideas_parser)
+    user_ideas_chain = user_ideas_prompt | model | user_ideas_parser
+    split_user_ideas_parser = PydanticOutputParser(pydantic_object=StoryIdeasOutput)
+    split_user_ideas_template = """
+You are expanding a broad user-provided lecture summary into multiple internal module ideas.
 
+The first normalization collapsed the draft into one idea, but the lecture context shows multiple dominant topics.
+Re-split the draft into multiple ideas when the draft spans multiple dominant topics.
+
+Return a STRICT JSON object with key `ideas`, where `ideas` is an array containing two or more items whenever the draft clearly covers multiple dominant topics.
+Each item must contain:
+- title
+- category
+- subcategory
+- context
+- story_orchestrator {{ main_point, opening, important_fact, conclusion }}
+
+Requirements:
+- Ground everything in transcript content.
+- Preserve the user draft's scope, but split broad summaries into distinct ideas.
+- Use dominant topics as the main splitting seeds.
+- Do not collapse unrelated dominant topics into one umbrella idea.
+- If two dominant topics are part of the same teaching unit, you may combine them.
+- If the draft truly supports only one coherent idea, you may return one item, but only if the dominant topics clearly point to a single unit.
+
+Output format instructions:
+{format_instructions}
+
+Original user idea draft:
+{user_idea}
+
+First collapsed idea:
+{first_idea_json}
+
+Editorial rules:
+{editorial_rules}
+
+Lecture context analysis:
+{context_analysis_json}
+
+Dominant topics:
+{dominant_topics_json}
+
+Transcript:
+<<<TRANSCRIPT>>>
+{transcript}
+<<<END>>>
+    """.strip()
+    split_user_ideas_prompt = _pydantic_prompt(split_user_ideas_template, split_user_ideas_parser)
+    split_user_ideas_chain = split_user_ideas_prompt | model | split_user_ideas_parser
     module_parser = PydanticOutputParser(pydantic_object=ModuleSelectionFlexibleOutput)
     select_segments_chain = _pydantic_chain(
         """
@@ -329,8 +542,15 @@ Output format instructions:
     )
 
     def analyze_context(state: SegmentWorkflowState) -> SegmentWorkflowState:
-        context_payload = context_chain.invoke({"transcript": state["transcript_text"]})
+        context_payload = context_chain.invoke({"transcript": state["transcript_text"]}, config=invoke_config)
         return {"context_analysis": context_payload.model_dump()}
+
+    def _snap_value_to_boundary(value: Any, valid_points: set[float]) -> tuple[float, bool]:
+        numeric = round(float(value), 2)
+        if numeric in valid_points:
+            return numeric, False
+        nearest = min(valid_points, key=lambda point: abs(point - numeric))
+        return nearest, True
 
     def _fallback_user_idea(raw_idea: str, *, reason: str | None = None) -> dict[str, Any]:
         context = "User-provided idea override from CLI."
@@ -375,14 +595,31 @@ Output format instructions:
             "Normalizing user-provided idea draft into structured story idea(s)",
         )
         try:
-            ideas_payload = user_ideas_chain.invoke(
-                {
-                    "user_idea": raw_idea_draft,
-                    "editorial_rules": state["editorial_rules"],
-                    "context_analysis_json": json.dumps(state["context_analysis"], ensure_ascii=False, indent=2),
-                    "transcript": state["transcript_text"],
-                }
-            )
+            dominant_topics_json = _dominant_topics_json(state["context_analysis"])
+            invoke_inputs = {
+                "user_idea": raw_idea_draft,
+                "editorial_rules": state["editorial_rules"],
+                "context_analysis_json": json.dumps(state["context_analysis"], ensure_ascii=False, indent=2),
+                "dominant_topics_json": dominant_topics_json,
+                "transcript": state["transcript_text"],
+            }
+            try:
+                rendered_prompt = user_ideas_prompt.format(**invoke_inputs)
+                logger.info(
+                    "Rendered user idea normalization prompt (%s chars)\n<<<USER_IDEA_NORMALIZATION_PROMPT>>>\n%s\n<<<END_USER_IDEA_NORMALIZATION_PROMPT>>>",
+                    len(rendered_prompt),
+                    rendered_prompt,
+                )
+            except Exception as render_exc:  # noqa: BLE001
+                logger.warning("Failed to render user idea normalization prompt for logging: %s", render_exc)
+            try:
+                ideas_payload = user_ideas_chain.invoke(invoke_inputs, config=invoke_config)
+            except Exception as first_exc:  # noqa: BLE001
+                logger.warning(
+                    "User idea draft normalization attempt 1 failed; retrying same normalization chain: %s",
+                    first_exc,
+                )
+                ideas_payload = user_ideas_chain.invoke(invoke_inputs, config=invoke_config)
             normalized_ideas: list[dict[str, Any]] = []
             for idx, item in enumerate(ideas_payload.ideas, start=1):
                 item_dict = _normalize_story_idea_dict(item.model_dump(), raw_idea_draft)
@@ -391,8 +628,29 @@ Output format instructions:
                 if not item_dict.get("category"):
                     raise ValueError(f"User idea item {idx} missing category.")
                 normalized_ideas.append(item_dict)
+            dominant_topics = json.loads(dominant_topics_json)
+            if _should_retry_user_idea_split(raw_idea_draft, normalized_ideas, dominant_topics):
+                logger.info(
+                    "User idea normalization collapsed to one idea despite multiple dominant topics; retrying with explicit split instructions."
+                )
+                split_inputs = {
+                    **invoke_inputs,
+                    "first_idea_json": json.dumps(normalized_ideas[0], ensure_ascii=False, indent=2),
+                }
+                split_payload = split_user_ideas_chain.invoke(split_inputs, config=invoke_config)
+                split_ideas: list[dict[str, Any]] = []
+                for idx, item in enumerate(split_payload.ideas, start=1):
+                    item_dict = _normalize_story_idea_dict(item.model_dump(), raw_idea_draft)
+                    if not item_dict.get("title"):
+                        raise ValueError(f"User idea split item {idx} missing title.")
+                    if not item_dict.get("category"):
+                        raise ValueError(f"User idea split item {idx} missing category.")
+                    split_ideas.append(item_dict)
+                if split_ideas:
+                    normalized_ideas = split_ideas
             if not normalized_ideas:
                 raise ValueError("User idea draft normalization returned zero ideas.")
+
             logger.info("User idea draft normalized into %s idea(s)", len(normalized_ideas))
             return {"story_ideas": normalized_ideas}
         except Exception as exc:  # noqa: BLE001
@@ -404,8 +662,10 @@ Output format instructions:
             {
                 "editorial_rules": state["editorial_rules"],
                 "context_analysis_json": json.dumps(state["context_analysis"], ensure_ascii=False, indent=2),
+                "dominant_topics_json": _dominant_topics_json(state["context_analysis"]),
                 "transcript": state["transcript_text"],
             },
+            config=invoke_config,
         )
         ideas: list[dict[str, Any]] = []
         for idx, item in enumerate(ideas_payload.ideas, start=1):
@@ -459,17 +719,63 @@ Output format instructions:
         return parsed
 
     def _validate_candidate_module(module_dict: dict[str, Any], drafted_modules: list[dict[str, Any]]) -> None:
-        validate_modules_payload([module_dict], transcript_lines=transcript_lines, enforce_duration=False)
+        validate_modules_payload(
+            [module_dict],
+            transcript_lines=transcript_lines,
+            enforce_duration=False,
+            enforce_global_overlap=False,
+        )
+
+    def _collect_candidate_issues(module_dict: dict[str, Any], drafted_modules: list[dict[str, Any]]) -> list[str]:
+        issues: list[str] = []
+        total_duration = sum(float(seg["end"]) - float(seg["start"]) for seg in module_dict.get("segments", []))
+        if total_duration < 180 or total_duration > 1200:
+            issues.append(
+                f"Suggested duration range is 3-20 minutes, but module duration is {total_duration:.1f}s."
+            )
+
         used_ranges = _used_ranges_list(drafted_modules)
         for seg_idx, seg in enumerate(module_dict.get("segments", []), start=1):
             start = float(seg["start"])
             end = float(seg["end"])
             for used_start, used_end in used_ranges:
                 if start < used_end and used_start < end:
-                    raise ValueError(
+                    issues.append(
                         "Module overlaps a previously selected range "
                         f"at segment {seg_idx} ({start:.2f}-{end:.2f} overlaps {used_start:.2f}-{used_end:.2f})."
                     )
+        return issues
+
+    def _snap_candidate_to_transcript_boundaries(module_dict: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        adjusted = dict(module_dict)
+        raw_segments = module_dict.get("segments") or []
+        if not isinstance(raw_segments, list):
+            return adjusted, []
+
+        valid_starts = {round(line.start, 2) for line in transcript_lines}
+        valid_ends = {round(line.end, 2) for line in transcript_lines}
+        snapped_segments: list[dict[str, Any]] = []
+        logs: list[str] = []
+
+        for seg_idx, seg in enumerate(raw_segments, start=1):
+            snapped = dict(seg)
+            start, start_changed = _snap_value_to_boundary(seg["start"], valid_starts)
+            raw_end = round(float(seg["end"]), 2)
+            candidate_ends = {point for point in valid_ends if point > start}
+            if candidate_ends:
+                end, end_changed = _snap_value_to_boundary(raw_end, candidate_ends)
+            else:
+                end, end_changed = _snap_value_to_boundary(raw_end, valid_ends)
+            snapped["start"] = start
+            snapped["end"] = end
+            snapped_segments.append(snapped)
+            if start_changed:
+                logs.append(f"segment_{seg_idx}_start_snapped:{float(seg['start']):.2f}->{start:.2f}")
+            if end_changed:
+                logs.append(f"segment_{seg_idx}_end_snapped:{float(seg['end']):.2f}->{end:.2f}")
+
+        adjusted["segments"] = snapped_segments
+        return adjusted, logs
 
     def _reorder_module_segments(module_dict: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         reordered = dict(module_dict)
@@ -491,6 +797,7 @@ Output format instructions:
         reordered: bool,
         attempt_count: int,
         logs: list[str],
+        errors_encountered: list[str],
     ) -> dict[str, Any]:
         out = dict(module_dict)
         out["retried"] = retried
@@ -502,6 +809,7 @@ Output format instructions:
             "model": stage_cfg.model,
             "provider": stage_cfg.provider,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "errors_encountered": errors_encountered,
             "logs": logs,
         }
         return out
@@ -522,9 +830,13 @@ Output format instructions:
                     "editorial_rules": state["editorial_rules"],
                     "transcript": state["transcript_text"],
                 },
+                config=invoke_config,
             )
             parsed_module = _normalize_module_from_flexible(module_payload, idx)
             candidate = parsed_module.model_dump()
+            candidate, snap_logs = _snap_candidate_to_transcript_boundaries(candidate)
+            logs.extend(snap_logs)
+            errors_encountered: list[str] = []
 
             retried = False
             reordered = False
@@ -550,9 +862,12 @@ Output format instructions:
                         "editorial_rules": state["editorial_rules"],
                         "transcript": state["transcript_text"],
                     },
+                    config=invoke_config,
                 )
                 retry_module = _normalize_module_from_flexible(retry_payload, idx)
                 candidate = retry_module.model_dump()
+                candidate, retry_snap_logs = _snap_candidate_to_transcript_boundaries(candidate)
+                logs.extend(retry_snap_logs)
 
                 try:
                     _validate_candidate_module(candidate, drafted)
@@ -575,6 +890,8 @@ Output format instructions:
                             f"Idea {idx + 1} failed after retry and reorder fallback: {final_exc}"
                         ) from final_exc
 
+            errors_encountered = _collect_candidate_issues(candidate, drafted)
+            logs.extend(f"nonfatal_issue:{issue}" for issue in errors_encountered)
             candidate = _attach_processing_metadata(
                 candidate,
                 idea_index=idx,
@@ -582,6 +899,7 @@ Output format instructions:
                 reordered=reordered,
                 attempt_count=attempt_count,
                 logs=logs,
+                errors_encountered=errors_encountered,
             )
             drafted.append(candidate)
             return {"drafted_modules": drafted, "selection_failures": selection_failures}
@@ -616,6 +934,11 @@ Output format instructions:
     def finalize_output(state: SegmentWorkflowState) -> SegmentWorkflowState:
         modules = list(state.get("drafted_modules", []))
         failures = list(state.get("selection_failures", []))
+        usage_summary = _build_usage_summary(
+            usage_callback,
+            provider=stage_cfg.provider,
+            configured_model=stage_cfg.model,
+        )
 
         def first_start(module: dict[str, Any]) -> float:
             segments = module.get("segments") or []
@@ -644,7 +967,13 @@ Output format instructions:
             )
         else:
             logger.info("Segmentation completed successfully with %s module(s).", len(modules))
-        return {"final_json": json.dumps(modules, ensure_ascii=False, indent=2)}
+        output_payload = {
+            "modules": modules,
+            "workflow_metadata": {
+                "llm_usage": usage_summary,
+            },
+        }
+        return {"final_json": json.dumps(output_payload, ensure_ascii=False, indent=2)}
 
     graph = StateGraph(SegmentWorkflowState)
     graph.add_node("analyze_context", analyze_context)
@@ -671,7 +1000,7 @@ Output format instructions:
     app = graph.compile()
     result = app.invoke(
         {
-            "transcript_text": transcript_text,
+            "transcript_text": normalized_transcript_text,
             "editorial_rules": editorial_rules,
             "user_idea_override": idea_override,
         }

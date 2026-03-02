@@ -9,10 +9,12 @@ from pathlib import Path
 
 from .config import PipelineConfig
 from .cutter import cut_modules_to_clips
+from .export_transcript_as_pdf import export_modules_pdf
 from .ffmpeg_utils import extract_audio_to_wav
 from .langchain_workflows import run_segment_generation_workflow
 from .llm_clients import transcribe_audio_with_timestamps
 from .segmentation import (
+    get_workflow_metadata,
     modules_to_jsonable,
     parse_llm_json_response,
     validate_modules_payload,
@@ -20,12 +22,23 @@ from .segmentation import (
 from .transcript import parse_transcript_txt, save_json, save_transcript_txt
 
 
+logger = logging.getLogger(__name__)
+
+
 def _resolve_idea_override(idea_arg: str | None) -> str | None:
     if idea_arg is None:
         return None
     candidate = Path(idea_arg).expanduser()
     if candidate.is_file():
-        return candidate.read_text(encoding="utf-8")
+        text = candidate.read_text(encoding="utf-8")
+        logger.info(
+            "Resolved --idea from file %s (%s chars, %s lines)\n<<<IDEA_FILE_CONTENT>>>\n%s\n<<<END_IDEA_FILE_CONTENT>>>",
+            candidate,
+            len(text),
+            len(text.splitlines()),
+            text,
+        )
+        return text
     return idea_arg
 
 
@@ -67,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_cut.add_argument("input_video", type=Path)
     p_cut.add_argument("modules_json", type=Path)
     p_cut.add_argument("--out-dir", type=Path, required=True)
+
+    p_export_pdf = sub.add_parser("export-pdf", help="Render modules JSON into a formatted PDF transcript.")
+    p_export_pdf.add_argument("modules_json", type=Path)
+    p_export_pdf.add_argument("-o", "--output", type=Path, required=True)
+    p_export_pdf.add_argument("--title", type=str)
 
     p_all = sub.add_parser("run-all", help="Run extract -> transcribe -> segment -> cut.")
     p_all.add_argument("input_video", type=Path)
@@ -129,8 +147,13 @@ def cmd_segment(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     if args.no_validate:
         output_payload = payload
     else:
-        modules = validate_modules_payload(payload, transcript_lines=transcript_lines)
-        output_payload = modules_to_jsonable(modules)
+        modules = validate_modules_payload(
+            payload,
+            transcript_lines=transcript_lines,
+            enforce_duration=False,
+            enforce_global_overlap=False,
+        )
+        output_payload = modules_to_jsonable(modules, workflow_metadata=get_workflow_metadata(payload))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     _print(f"[segment] Wrote modules JSON -> {args.output}")
@@ -141,6 +164,14 @@ def cmd_cut(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     _print(f"[cut] Cutting clips from {args.input_video} using {args.modules_json}")
     created = cut_modules_to_clips(cfg.ffmpeg_bin, args.input_video, args.modules_json, args.out_dir)
     _print(f"[cut] Created {len(created)} clips in {args.out_dir}")
+    return 0
+
+
+def cmd_export_pdf(args: argparse.Namespace, cfg: PipelineConfig) -> int:
+    del cfg
+    _print(f"[export-pdf] Rendering {args.modules_json} -> {args.output}")
+    export_modules_pdf(args.modules_json, args.output, document_title=args.title)
+    _print(f"[export-pdf] Wrote PDF -> {args.output}")
     return 0
 
 
@@ -183,8 +214,13 @@ def cmd_run_all(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     if args.no_validate:
         modules_jsonable = payload
     else:
-        modules = validate_modules_payload(payload, transcript_lines=lines)
-        modules_jsonable = modules_to_jsonable(modules)
+        modules = validate_modules_payload(
+            payload,
+            transcript_lines=lines,
+            enforce_duration=False,
+            enforce_global_overlap=False,
+        )
+        modules_jsonable = modules_to_jsonable(modules, workflow_metadata=get_workflow_metadata(payload))
     modules_path.write_text(json.dumps(modules_jsonable, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     _print(f"[run-all] Modules JSON written -> {modules_path}")
 
@@ -210,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_segment(args, cfg)
         if args.command == "cut":
             return cmd_cut(args, cfg)
+        if args.command == "export-pdf":
+            return cmd_export_pdf(args, cfg)
         if args.command == "run-all":
             return cmd_run_all(args, cfg)
     except Exception as exc:  # noqa: BLE001
