@@ -89,21 +89,27 @@ stp transcribe work/audio.wav \
 
 ```bash
 stp segment work/transcript.txt -o work/modules.json
+pipenv run stp segment "C:\Users\elixa\Desktop\archive\Module 1 Intro to Shakti Kundalini Yoga_whisper_1.txt" -o "C:\Users\elixa\Desktop\archive\processed_text\M1_whisper_v4_wo_user_idea_input.json"
 ```
 
 ### 4) Cut clips from the source video
 
 ```bash
 stp cut input.mp4 work/modules.json --out-dir work/clips
-pipenv run stp cut "C:\Users\elixa\Desktop\7 Modules\M1 Intro to Shakti Kundalini Yoga.mp4" "C:\Users\elixa\Desktop\archive\M1_whisper_v5_with_user_idea_input.json" --out-dir "C:\Users\elixa\Desktop\archive\processed_clips" --logo "C:/Users/elixa/Desktop/archive/sscf_logohead.png" 
+pipenv run stp cut "C:\Users\elixa\Desktop\7 Modules\Module 1 Intro to Shakti Kundalini Yoga.mp4" "C:\Users\elixa\Desktop\archive\processed_text\M1_whisper_v4_wo_user_idea_input.json" --out-dir "C:\Users\elixa\Desktop\archive\processed_clips" --logo "C:/Users/elixa/Desktop/archive/sscf_logohead.png" 
 ```
 
 By default this command overlays the configured logo and burns subtitles from the module segments. Use `--logo`/`--skip-logo`/`--logo-margin` to control the placement and `--no-subtitles`, `--subtitle-font`, or `--subtitle-font-size` to adjust the captions.
+
+If you need to resume a long cut job from a later module, use `--start-module 4` (for example) to begin at module 4 instead of reprocessing earlier modules.
+
+For cleaner subtitles, regenerate the modules JSON with `stp segment` after pulling the latest code. The saved JSON now includes the original transcript lines inside each selected segment, and `stp cut` uses those shorter line-level timings instead of one long subtitle block per segment.
 
 ### 5) Export modules JSON to PDF
 
 ```bash
 stp export-pdf work/modules.json -o work/modules.pdf
+pipenv run stp export-pdf "C:\Users\elixa\Desktop\archive\processed_text\M1_whisper_v4_wo_user_idea_input.json" -o "C:\Users\elixa\Desktop\archive\processed_text\M1_whisper_v4_wo_user_idea_input.pdf"
 ```
 
 ### Full pipeline

@@ -86,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cut.add_argument("--no-subtitles", action="store_true", help="Skip burning subtitles into the clips.")
     p_cut.add_argument("--subtitle-font", type=Path, help="Override the font directory used by ffmpeg for subtitles.")
     p_cut.add_argument("--subtitle-font-size", type=int, help="Override the subtitle font size.")
+    p_cut.add_argument("--start-module", type=int, default=1, help="Start cutting from this 1-based module index.")
 
     p_export_pdf = sub.add_parser("export-pdf", help="Render modules JSON into a formatted PDF transcript.")
     p_export_pdf.add_argument("modules_json", type=Path)
@@ -184,7 +185,13 @@ def cmd_cut(args: argparse.Namespace, cfg: PipelineConfig) -> int:
         video_encoder_args=cfg.cut.video_encoder_args,
     )
     created = cut_modules_to_clips(
-        cfg.ffmpeg_bin, args.input_video, args.modules_json, args.out_dir, render_config
+        cfg.ffmpeg_bin,
+        cfg.ffprobe_bin,
+        args.input_video,
+        args.modules_json,
+        args.out_dir,
+        render_config,
+        start_module=args.start_module,
     )
     _print(f"[cut] Created {len(created)} clips in {args.out_dir}")
     return 0
@@ -247,7 +254,14 @@ def cmd_run_all(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     modules_path.write_text(json.dumps(modules_jsonable, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     _print(f"[run-all] Modules JSON written -> {modules_path}")
 
-    created = cut_modules_to_clips(cfg.ffmpeg_bin, video_path, modules_path, clips_dir, cfg.cut)
+    created = cut_modules_to_clips(
+        cfg.ffmpeg_bin,
+        cfg.ffprobe_bin,
+        video_path,
+        modules_path,
+        clips_dir,
+        cfg.cut,
+    )
     _print(f"[run-all] Created {len(created)} clips in {clips_dir}")
     return 0
 

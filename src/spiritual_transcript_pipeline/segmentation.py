@@ -101,7 +101,46 @@ def _to_module_clip(item: dict[str, Any], idx: int) -> ModuleClip:
             raise ValueError(f"Module {idx} segment {seg_idx}: end must be > start")
         if not text:
             raise ValueError(f"Module {idx} segment {seg_idx}: empty text")
-        segments.append(ModuleSegment(start=start, end=end, text=text))
+        raw_transcript_lines = seg.get("transcript_lines")
+        parsed_transcript_lines: list[TranscriptLine] | None = None
+        if raw_transcript_lines is not None:
+            if not isinstance(raw_transcript_lines, list):
+                raise ValueError(
+                    f"Module {idx} segment {seg_idx}: transcript_lines must be a list when present"
+                )
+            parsed_transcript_lines = []
+            for line_idx, line in enumerate(raw_transcript_lines, start=1):
+                if not isinstance(line, dict):
+                    raise ValueError(
+                        f"Module {idx} segment {seg_idx} transcript line {line_idx}: expected object"
+                    )
+                try:
+                    line_start = float(line["start"])
+                    line_end = float(line["end"])
+                    line_text = str(line["text"]).strip()
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(
+                        f"Module {idx} segment {seg_idx} transcript line {line_idx}: invalid fields"
+                    ) from exc
+                if line_end <= line_start:
+                    raise ValueError(
+                        f"Module {idx} segment {seg_idx} transcript line {line_idx}: end must be > start"
+                    )
+                if not line_text:
+                    raise ValueError(
+                        f"Module {idx} segment {seg_idx} transcript line {line_idx}: empty text"
+                    )
+                parsed_transcript_lines.append(
+                    TranscriptLine(start=line_start, end=line_end, text=line_text)
+                )
+        segments.append(
+            ModuleSegment(
+                start=start,
+                end=end,
+                text=text,
+                transcript_lines=parsed_transcript_lines,
+            )
+        )
 
     subcategory = item.get("subcategory")
     if subcategory is not None and not isinstance(subcategory, str):
@@ -153,9 +192,13 @@ def validate_modules_payload(
     all_intervals: list[tuple[float, float, int, int]] = []
     valid_starts: set[float] = set()
     valid_ends: set[float] = set()
+    transcript_by_start_end: dict[tuple[float, float], TranscriptLine] = {}
     if transcript_lines is not None:
         valid_starts = {round(t.start, 2) for t in transcript_lines}
         valid_ends = {round(t.end, 2) for t in transcript_lines}
+        transcript_by_start_end = {
+            (round(t.start, 2), round(t.end, 2)): t for t in transcript_lines
+        }
 
     for mod_idx, module in enumerate(modules, start=1):
         prev_end: float | None = None
@@ -178,6 +221,14 @@ def validate_modules_payload(
                     raise ValueError(
                         f"Module {mod_idx} segment {seg_idx}: end {seg.end:.2f} is not a transcript boundary."
                     )
+                seg.transcript_lines = [
+                    transcript_by_start_end[(round(line.start, 2), round(line.end, 2))]
+                    for line in transcript_lines
+                    if round(line.start, 2) >= round(seg.start, 2)
+                    and round(line.end, 2) <= round(seg.end, 2)
+                ]
+                if seg.transcript_lines:
+                    seg.text = "\n".join(line.text for line in seg.transcript_lines)
 
         if enforce_duration and (total_duration < 180 or total_duration > 1200):
             raise ValueError(
@@ -213,7 +264,20 @@ def modules_to_jsonable(
             "reordered": module.reordered,
             "processing_metadata": module.processing_metadata,
             "segments": [
-                {"start": seg.start, "end": seg.end, "text": seg.text} for seg in module.segments
+                {
+                    "start": seg.start,
+                    "end": seg.end,
+                    "text": seg.text,
+                    "transcript_lines": (
+                        [
+                            {"start": line.start, "end": line.end, "text": line.text}
+                            for line in seg.transcript_lines
+                        ]
+                        if seg.transcript_lines
+                        else None
+                    ),
+                }
+                for seg in module.segments
             ],
         }
         for module in modules

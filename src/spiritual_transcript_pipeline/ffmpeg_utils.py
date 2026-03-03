@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -11,6 +12,53 @@ def _run(cmd: list[str]) -> None:
     except subprocess.CalledProcessError as exc:
         rendered = " ".join(shlex.quote(part) for part in cmd)
         raise RuntimeError(f"Command failed ({exc.returncode}): {rendered}") from exc
+
+
+def probe_media_duration(ffprobe_bin: str, input_path: Path) -> float:
+    cmd = [
+        ffprobe_bin,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(input_path),
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        rendered = " ".join(shlex.quote(part) for part in cmd)
+        raise RuntimeError(f"Command failed ({exc.returncode}): {rendered}") from exc
+    output = result.stdout.strip()
+    if not output:
+        raise RuntimeError(f"Unable to determine media duration for {input_path}")
+    return float(output)
+
+
+def probe_decodable_video_duration(ffmpeg_bin: str, input_path: Path) -> float:
+    cmd = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-i",
+        str(input_path),
+        "-map",
+        "0:v:0",
+        "-f",
+        "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        rendered = " ".join(shlex.quote(part) for part in cmd)
+        raise RuntimeError(f"Command failed ({exc.returncode}): {rendered}") from exc
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    matches = re.findall(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", combined_output)
+    if not matches:
+        raise RuntimeError(f"Unable to determine decodable video duration for {input_path}")
+    hours, minutes, seconds = matches[-1].split(":")
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 
 def extract_audio_to_wav(

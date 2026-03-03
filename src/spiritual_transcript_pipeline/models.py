@@ -16,6 +16,7 @@ class ModuleSegment:
     start: float
     end: float
     text: str
+    transcript_lines: list[TranscriptLine] | None = None
 
 
 @dataclass

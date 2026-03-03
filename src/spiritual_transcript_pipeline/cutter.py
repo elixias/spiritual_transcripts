@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import CutRenderConfig
-from .ffmpeg_utils import concat_videos, cut_video_segment, _run
+from .ffmpeg_utils import (
+    concat_videos,
+    cut_video_segment,
+    probe_decodable_video_duration,
+    probe_media_duration,
+    _run,
+)
 from .models import ModuleClip, ModuleSegment
 from .segmentation import validate_modules_payload
 
@@ -42,29 +48,51 @@ def _module_output_name(index: int, module: ModuleClip) -> str:
 
 def cut_modules_to_clips(
     ffmpeg_bin: str,
+    ffprobe_bin: str,
     source_video: Path,
     modules_json: Path,
     out_dir: Path,
     render_config: CutRenderConfig,
+    start_module: int = 1,
 ) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     modules = _load_modules(modules_json)
+    source_duration = probe_media_duration(ffprobe_bin, source_video)
+    max_segment_end = max(seg.end for module in modules for seg in module.segments)
+    if max_segment_end > source_duration + 1.0:
+        logger.warning(
+            "[cut] Source container duration %.3fs is shorter than max segment end %.3fs; "
+            "probing decodable duration for %s",
+            source_duration,
+            max_segment_end,
+            source_video,
+        )
+        source_duration = probe_decodable_video_duration(ffmpeg_bin, source_video)
     created: list[Path] = []
 
     for idx, module in enumerate(modules, start=1):
+        if idx < start_module:
+            continue
         module_total = sum(max(0.0, seg.end - seg.start) for seg in module.segments)
         logger.info(
-            "[cut] Module %03d '%s' segments=%d total_duration=%.3fs",
+            "[cut] Module %03d '%s' segments=%d total_duration=%.3fs source_duration=%.3fs",
             idx,
             module.title,
             len(module.segments),
             module_total,
+            source_duration,
         )
         output_path = out_dir / _module_output_name(idx, module)
         with tempfile.TemporaryDirectory(prefix=f"module_{idx:03d}_", dir=out_dir) as tmpdir:
             tmpdir_path = Path(tmpdir)
             part_files: list[Path] = []
             for seg_idx, seg in enumerate(module.segments, start=1):
+                if seg.start >= source_duration:
+                    raise RuntimeError(
+                        f"Module {idx:03d} segment {seg_idx:03d} starts at {seg.start:.3f}s, "
+                        f"but source video is only {source_duration:.3f}s long. "
+                        f"Use the matching source video or resume from a later module with --start-module."
+                    )
                 logger.info(
                     "[cut]  segment %03d start=%.3f end=%.3f duration=%.3f",
                     seg_idx,
@@ -250,19 +278,38 @@ def _write_subtitles(module: ModuleClip, out_path: Path) -> bool:
     cursor = 0.0
     index = 1
     for segment in module.segments:
-        duration = max(0.0, segment.end - segment.start)
-        if duration <= 0:
+        segment_duration = max(0.0, segment.end - segment.start)
+        if segment_duration <= 0:
             continue
-        raw_text = segment.text.strip()
-        safe_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
-        if safe_lines:
-            text_block = "\n".join(safe_lines)
-            lines.append(f"{index}")
-            lines.append(f"{_srt_timestamp(cursor)} --> {_srt_timestamp(cursor + duration)}")
-            lines.append(text_block)
-            lines.append("")
-            index += 1
-        cursor += duration
+        if segment.transcript_lines:
+            for transcript_line in segment.transcript_lines:
+                relative_start = max(0.0, transcript_line.start - segment.start)
+                relative_end = min(segment_duration, transcript_line.end - segment.start)
+                line_duration = max(0.0, relative_end - relative_start)
+                if line_duration <= 0:
+                    continue
+                text = transcript_line.text.strip()
+                if not text:
+                    continue
+                lines.append(f"{index}")
+                lines.append(
+                    f"{_srt_timestamp(cursor + relative_start)} --> "
+                    f"{_srt_timestamp(cursor + relative_end)}"
+                )
+                lines.append(text)
+                lines.append("")
+                index += 1
+        else:
+            raw_text = segment.text.strip()
+            safe_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+            if safe_lines:
+                text_block = "\n".join(safe_lines)
+                lines.append(f"{index}")
+                lines.append(f"{_srt_timestamp(cursor)} --> {_srt_timestamp(cursor + segment_duration)}")
+                lines.append(text_block)
+                lines.append("")
+                index += 1
+        cursor += segment_duration
     if not lines:
         return False
     out_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
