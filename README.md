@@ -83,6 +83,8 @@ stp extract-audio input.mp4 -o work/audio.wav
 stp transcribe work/audio.wav \
   --transcript-out work/transcript.txt \
   --raw-json-out work/transcript_verbose.json
+
+pipenv run stp transcribe "C:\Users\elixa\Desktop\archive\converted_mp3\2012 06 19 Sadhak Induction Modules\Module 7 Sapta Shloki.mp3" --transcript-out "C:\Users\elixa\Desktop\archive\processed\Module 7 Sapta Shloki\transcript.txt"
 ```
 
 ### 3) Generate module JSON from transcript

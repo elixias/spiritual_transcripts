@@ -12,7 +12,7 @@ from .cutter import cut_modules_to_clips
 from .export_transcript_as_pdf import export_modules_pdf
 from .ffmpeg_utils import extract_audio_to_wav
 from .langchain_workflows import run_segment_generation_workflow
-from .llm_clients import transcribe_audio_with_timestamps
+from .models import TranscriptLine
 from .segmentation import (
     get_workflow_metadata,
     modules_to_jsonable,
@@ -20,6 +20,7 @@ from .segmentation import (
     validate_modules_payload,
 )
 from .transcript import parse_transcript_txt, save_json, save_transcript_txt
+from .transcript_v2 import DEFAULT_SEGMENT_SECONDS, transcribe_media
 
 
 logger = logging.getLogger(__name__)
@@ -122,9 +123,27 @@ def cmd_extract_audio(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     return 0
 
 
+def _transcribe_with_v2(audio_path: Path, cfg: PipelineConfig) -> tuple[list[TranscriptLine], dict]:
+    backend = (cfg.transcribe.provider or "openai").strip().lower()
+    result = transcribe_media(
+        audio_path,
+        backend=backend,
+        model_id=cfg.transcribe.model,
+        segment_duration=DEFAULT_SEGMENT_SECONDS,
+        ffmpeg_bin=cfg.ffmpeg_bin,
+        ffprobe_bin=cfg.ffprobe_bin,
+        show_progress=True,
+    )
+    lines = [
+        TranscriptLine(start=segment.start, end=segment.end, text=segment.text)
+        for segment in result.segments
+    ]
+    return lines, result.raw_payload
+
+
 def cmd_transcribe(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     _print(f"[transcribe] Transcribing {args.input_audio} with model={cfg.transcribe.model}")
-    lines, raw_payload = transcribe_audio_with_timestamps(args.input_audio, cfg.transcribe)
+    lines, raw_payload = _transcribe_with_v2(args.input_audio, cfg)
     save_transcript_txt(lines, args.transcript_out)
     _print(f"[transcribe] Wrote transcript -> {args.transcript_out}")
     if args.raw_json_out:
@@ -225,7 +244,7 @@ def cmd_run_all(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     extract_audio_to_wav(cfg.ffmpeg_bin, video_path, audio_path, sample_rate=args.sample_rate)
     _print(f"[run-all] Audio extracted -> {audio_path}")
 
-    lines, raw_payload = transcribe_audio_with_timestamps(audio_path, cfg.transcribe)
+    lines, raw_payload = _transcribe_with_v2(audio_path, cfg)
     save_transcript_txt(lines, transcript_path)
     save_json(raw_payload, raw_transcribe_path)
     _print(f"[run-all] Transcript written -> {transcript_path}")
