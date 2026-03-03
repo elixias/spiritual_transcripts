@@ -57,6 +57,18 @@ If `SEGMENT_API_KEY` is not set, the provider-specific env key (`OPENAI_API_KEY`
 Transcription remains on the OpenAI SDK because this pipeline requires timestamped segment output
 (`verbose_json` with segment timestamps), which LangChain does not provide as a stable abstraction.
 
+### Cut rendering defaults
+
+Clipping now has a little extra rendering pass that overlays your logo and burns subtitles. The appearance and encoder are driven by cut-specific keys in `.env`:
+
+- `CUT_LOGO_PATH`: path to a PNG/JPG that will be placed in the top-right corner (margin controlled by `CUT_LOGO_MARGIN`).
+- `CUT_ENABLE_SUBTITLES`: set to `0`/`false` to disable the automatic subtitles that are generated from each module's segments.
+- `CUT_SUBTITLE_FONT_PATH`: optional font directory for ffmpeg (`fontsdir`). Use `CUT_SUBTITLE_FONT_SIZE`, `CUT_SUBTITLE_COLOR`, `CUT_SUBTITLE_OUTLINE_COLOR`, `CUT_SUBTITLE_OUTLINE_WIDTH`, and `CUT_SUBTITLE_MARGIN` to tweak the caption styling.
+- `CUT_VIDEO_ENCODER`: default `libx264`; change to `h264_nvenc`/`hevc_nvenc` to keep the pass GPU-accelerated.
+- `CUT_VIDEO_ENCODER_ARGS`: encoder arguments (default `-preset medium -crf 20`). For fast GPU output try `-preset fast -rc:v vbr_hq -cq 20 -b:v 0`.
+
+The same defaults are used by `stp cut` and the `run-all` workflow, but you can override them per invocation with the new CLI flags.
+
 ## Commands
 
 ### 1) Extract audio
@@ -83,7 +95,10 @@ stp segment work/transcript.txt -o work/modules.json
 
 ```bash
 stp cut input.mp4 work/modules.json --out-dir work/clips
+pipenv run stp cut "C:\Users\elixa\Desktop\7 Modules\M1 Intro to Shakti Kundalini Yoga.mp4" "C:\Users\elixa\Desktop\archive\M1_whisper_v5_with_user_idea_input.json" --out-dir "C:\Users\elixa\Desktop\archive\processed_clips" --logo "C:/Users/elixa/Desktop/archive/sscf_logohead.png" 
 ```
+
+By default this command overlays the configured logo and burns subtitles from the module segments. Use `--logo`/`--skip-logo`/`--logo-margin` to control the placement and `--no-subtitles`, `--subtitle-font`, or `--subtitle-font-size` to adjust the captions.
 
 ### 5) Export modules JSON to PDF
 

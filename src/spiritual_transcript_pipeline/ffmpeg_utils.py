@@ -48,10 +48,10 @@ def cut_video_segment(
     cmd = [
         ffmpeg_bin,
         "-y",
-        "-i",
-        str(input_video),
         "-ss",
         f"{start:.3f}",
+        "-i",
+        str(input_video),
         "-t",
         f"{duration:.3f}",
         "-c:v",
@@ -64,6 +64,10 @@ def cut_video_segment(
         "aac",
         "-b:a",
         "160k",
+        "-reset_timestamps",
+        "1",
+        "-avoid_negative_ts",
+        "make_zero",
         "-movflags",
         "+faststart",
         str(output_path),
@@ -76,7 +80,7 @@ def concat_videos(ffmpeg_bin: str, files: list[Path], concat_list_file: Path, ou
     output_path.parent.mkdir(parents=True, exist_ok=True)
     lines = []
     for file_path in files:
-        escaped = str(file_path.resolve()).replace("'", "'\\''")
+        escaped = file_path.resolve().as_posix().replace("'", "'\\''")
         lines.append(f"file '{escaped}'")
     concat_list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     cmd = [
@@ -88,16 +92,12 @@ def concat_videos(ffmpeg_bin: str, files: list[Path], concat_list_file: Path, ou
         "0",
         "-i",
         str(concat_list_file),
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "20",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
+        "-c",
+        "copy",
+        "-fflags",
+        "+genpts",
+        "-avoid_negative_ts",
+        "make_zero",
         "-movflags",
         "+faststart",
         str(output_path),

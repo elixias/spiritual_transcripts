@@ -7,7 +7,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from .config import PipelineConfig
+from .config import CutRenderConfig, PipelineConfig
 from .cutter import cut_modules_to_clips
 from .export_transcript_as_pdf import export_modules_pdf
 from .ffmpeg_utils import extract_audio_to_wav
@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cut.add_argument("input_video", type=Path)
     p_cut.add_argument("modules_json", type=Path)
     p_cut.add_argument("--out-dir", type=Path, required=True)
+    p_cut.add_argument("--logo", type=Path, help="Optional override path for the overlay logo.")
+    p_cut.add_argument("--skip-logo", action="store_true", help="Do not overlay a logo even if configured.")
+    p_cut.add_argument("--logo-margin", type=int, help="Override the top/right margin for the logo overlay.")
+    p_cut.add_argument("--no-subtitles", action="store_true", help="Skip burning subtitles into the clips.")
+    p_cut.add_argument("--subtitle-font", type=Path, help="Override the font directory used by ffmpeg for subtitles.")
+    p_cut.add_argument("--subtitle-font-size", type=int, help="Override the subtitle font size.")
 
     p_export_pdf = sub.add_parser("export-pdf", help="Render modules JSON into a formatted PDF transcript.")
     p_export_pdf.add_argument("modules_json", type=Path)
@@ -162,7 +168,24 @@ def cmd_segment(args: argparse.Namespace, cfg: PipelineConfig) -> int:
 
 def cmd_cut(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     _print(f"[cut] Cutting clips from {args.input_video} using {args.modules_json}")
-    created = cut_modules_to_clips(cfg.ffmpeg_bin, args.input_video, args.modules_json, args.out_dir)
+    logo_path = None if args.skip_logo else args.logo or cfg.cut.logo_path
+    subtitle_font_path = args.subtitle_font or cfg.cut.subtitle_font_path
+    render_config = CutRenderConfig(
+        logo_path=logo_path,
+        logo_margin=args.logo_margin if args.logo_margin is not None else cfg.cut.logo_margin,
+        subtitles_enabled=not args.no_subtitles and cfg.cut.subtitles_enabled,
+        subtitle_font_path=subtitle_font_path,
+        subtitle_font_size=args.subtitle_font_size or cfg.cut.subtitle_font_size,
+        subtitle_color=cfg.cut.subtitle_color,
+        subtitle_outline_color=cfg.cut.subtitle_outline_color,
+        subtitle_outline_width=cfg.cut.subtitle_outline_width,
+        subtitle_margin=cfg.cut.subtitle_margin,
+        video_encoder=cfg.cut.video_encoder,
+        video_encoder_args=cfg.cut.video_encoder_args,
+    )
+    created = cut_modules_to_clips(
+        cfg.ffmpeg_bin, args.input_video, args.modules_json, args.out_dir, render_config
+    )
     _print(f"[cut] Created {len(created)} clips in {args.out_dir}")
     return 0
 
@@ -224,7 +247,7 @@ def cmd_run_all(args: argparse.Namespace, cfg: PipelineConfig) -> int:
     modules_path.write_text(json.dumps(modules_jsonable, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     _print(f"[run-all] Modules JSON written -> {modules_path}")
 
-    created = cut_modules_to_clips(cfg.ffmpeg_bin, video_path, modules_path, clips_dir)
+    created = cut_modules_to_clips(cfg.ffmpeg_bin, video_path, modules_path, clips_dir, cfg.cut)
     _print(f"[run-all] Created {len(created)} clips in {clips_dir}")
     return 0
 
